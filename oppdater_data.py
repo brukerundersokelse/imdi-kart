@@ -54,7 +54,7 @@ SX_KOMMUNE_VARIABEL = os.environ.get("SX_KOMMUNE_VARIABEL") or "ptype2t"
 # under. Standard: statoverall = 4 («Gjennomført»). Bruk "3,4" for å ta med
 # delvise svar. Er variabelen eksportert som 0/1-kolonner (statoverall_4),
 # brukes de automatisk.
-SX_STATUS_VARIABEL = os.environ.get("SX_STATUS_VARIABEL") or "statoverall"
+SX_STATUS_VARIABEL = os.environ.get("SX_STATUS_VARIABEL") or "stato"
 SX_STATUS_VERDIER = [v.strip() for v in (os.environ.get("SX_STATUS_VERDIER") or "4").split(",") if v.strip()]
 
 # Kommuner med færre besvarelser enn dette (men flere enn 0) skrives som
