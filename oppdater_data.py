@@ -23,6 +23,7 @@ import csv
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -51,11 +52,22 @@ SX_SURVEY_ID = os.environ.get("SX_SURVEY_ID") or "1229499"
 SX_KOMMUNE_VARIABEL = os.environ.get("SX_KOMMUNE_VARIABEL") or "ptype2t"
 
 # En respondent telles som besvarelse når statusvariabelen har en av verdiene
-# under. Standard: statoverall = 4 («Gjennomført»). Bruk "3,4" for å ta med
+# under. Standard: stato (Samlet status / statoverall) = 4 («Gjennomført»). Bruk "3,4" for å ta med
 # delvise svar. Er variabelen eksportert som 0/1-kolonner (statoverall_4),
 # brukes de automatisk.
 SX_STATUS_VARIABEL = os.environ.get("SX_STATUS_VARIABEL") or "stato"
 SX_STATUS_VERDIER = [v.strip() for v in (os.environ.get("SX_STATUS_VERDIER") or "4").split(",") if v.strip()]
+
+# Bare respondenter som oppfyller ALLE filtrene, telles. Tom liste = ingen filter.
+# Hver linje: ("variabel", "operator", "verdi").
+# Operatorer: =  !=  >  >=  <  <=
+# Tekst sammenlignes uten hensyn til store/små bokstaver og mellomrom før/etter.
+# Tidspunkter skrives som "ÅÅÅÅ-MM-DD TT:MM:SS" og sammenlignes slik de står
+# i datasettet, uten omregning mellom tidssoner.
+FILTRE = [
+    ("ptype1t", "=", "IMDi"),
+    ("created", ">", "2026-10-19 09:00:00"),
+]
 
 # Kommuner med færre besvarelser enn dette (men flere enn 0) skrives som
 # «færre enn N» i stedet for eksakt antall. 0 = vis alle tall.
@@ -291,7 +303,84 @@ def lag_statustest(kolonner):
     return None
 
 
+_DATOFORMATER = (
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%d",
+    "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y",
+    "%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%d.%m.%Y",
+    "%m/%d/%Y %H:%M:%S", "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %I:%M %p", "%m/%d/%Y",
+)
+
+
+def som_dato(verdi):
+    """Tolker et tidspunkt. Returnerer None hvis verdien ikke er et tidspunkt."""
+    v = str(verdi).strip()
+    if not v or not re.search(r"\d[-./]\d", v):
+        return None
+    v = re.sub(r"(\d{2}:\d{2}:\d{2})[.,]\d+", r"\1", v)      # brøkdeler av sekund
+    v = re.sub(r"(?<=:\d{2})\s*(Z|[+-]\d{2}:?\d{2})$", "", v)   # tidssone etter klokkeslett
+    for fmt in _DATOFORMATER:
+        try:
+            return datetime.strptime(v, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def som_tall(verdi):
+    try:
+        return float(str(verdi).strip().replace(",", "."))
+    except ValueError:
+        return None
+
+
+_OPERATORER = {
+    "=": lambda a, b: a == b, "!=": lambda a, b: a != b,
+    ">": lambda a, b: a > b, ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b, "<=": lambda a, b: a <= b,
+}
+
+
+def lag_filter(kolonner):
+    """Returnerer en funksjon som sier om en rad oppfyller FILTRE, eller None uten filter."""
+    if not FILTRE:
+        return None
+    mangler = [kol for kol, _, _ in FILTRE if kol not in kolonner]
+    if mangler:
+        raise RuntimeError("Finner ikke filtervariabelen %s i datasettet." % " og ".join(mangler))
+    tester = []
+    for kol, op, verdi in FILTRE:
+        if op not in _OPERATORER:
+            raise RuntimeError("Ukjent operator «%s» i FILTRE. Bruk = != > >= < <=." % op)
+        sml = _OPERATORER[op]
+        dato, tall = som_dato(verdi), som_tall(verdi)
+        if dato is not None:
+            tester.append((kol, "dato", lambda x, d=dato, f=sml: f(som_dato(x), d)))
+        elif tall is not None:
+            tester.append((kol, "tall", lambda x, t=tall, f=sml: f(som_tall(x), t)))
+        else:
+            tekst = str(verdi).strip().casefold()
+            tester.append((kol, "tekst", lambda x, t=tekst, f=sml: f(str(x).strip().casefold(), t)))
+
+    def oppfyller(rad):
+        for kol, typ, test in tester:
+            x = rad.get(kol, "")
+            if typ == "dato":
+                if som_dato(x) is None:
+                    if str(x).strip():
+                        raise RuntimeError(
+                            "Kan ikke tolke «%s» i %s som tidspunkt." % (str(x).strip(), kol))
+                    return False
+            elif typ == "tall" and som_tall(x) is None:
+                return False
+            if not test(x):
+                return False
+        return True
+
+    return oppfyller
+
+
 def tell(kolonner, rader, verdikart):
+    filtertest = lag_filter(kolonner)
     statustest = lag_statustest(kolonner)
     mangler = [] if statustest else [SX_STATUS_VARIABEL]
     if SX_KOMMUNE_VARIABEL not in kolonner:
@@ -307,7 +396,11 @@ def tell(kolonner, rader, verdikart):
     per_kommune = Counter()
     ukjente = Counter()
     total = 0
+    med = 0
     for rad in rader:
+        if filtertest and not filtertest(rad):
+            continue
+        med += 1
         if not statustest(rad):
             continue
         total += 1
@@ -317,7 +410,7 @@ def tell(kolonner, rader, verdikart):
             per_kommune[nr] += 1
         else:
             ukjente[str(verdi).strip() or "(tom)"] += 1
-    return total, per_kommune, ukjente
+    return total, per_kommune, ukjente, med
 
 
 def bygg_data(total, per_kommune, ukjente):
@@ -368,7 +461,9 @@ def kjor(args, verdikart):
             print("  " + k)
         return
 
-    total, per_kommune, ukjente = tell(kolonner, rader, verdikart)
+    total, per_kommune, ukjente, med = tell(kolonner, rader, verdikart)
+    if FILTRE:
+        logg("Filter: %d av %d respondenter er med." % (med, len(rader)))
     data = bygg_data(total, per_kommune, ukjente)
     skriv_atomisk(args.ut, data)
     logg(
