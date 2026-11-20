@@ -1,0 +1,46 @@
+# Legges i repoet som .github/workflows/oppdater-kart.yml
+name: Oppdater kart
+
+on:
+  schedule:
+    - cron: "3-59/10 * * * *"   # hvert 10. minutt (minutt 3, 13, 23 ...)
+  workflow_dispatch:             # gir knappen «Run workflow» i Actions-fanen
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  oppdater:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Feiler dette steget, publiseres ingenting, og kartet beholder forrige tall.
+      - name: Hent tall fra SurveyXact
+        env:
+          SX_USER: ${{ secrets.SX_USER }}
+          SX_PASSWORD: ${{ secrets.SX_PASSWORD }}
+        run: |
+          mkdir _site
+          cp index.html _site/
+          python3 oppdater_data.py --ut _site/data.json
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v5
