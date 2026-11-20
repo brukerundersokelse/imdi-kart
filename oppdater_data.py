@@ -37,24 +37,25 @@ from datetime import datetime, timezone
 # Alle kan overstyres med miljøvariabler med samme navn.
 
 # Adressen til SurveyXacts REST-API.
-SX_BASE_URL = os.environ.get("SX_BASE_URL") or "https://www.survey-xact.dk/rest"
+SX_BASE_URL = os.environ.get("SX_BASE_URL") or "https://rest.survey-xact.dk/rest"
 
 # API-bruker. Legg brukernavn og passord i miljøvariabler, ikke i denne filen.
 SX_USER = os.environ.get("SX_USER", "")
 SX_PASSWORD = os.environ.get("SX_PASSWORD", "")
 
-# Målingens id i SurveyXact. 195896552 er hentet fra «project» i statuslenken;
-# bekreft at det er samme id som API-et bruker.
-SX_SURVEY_ID = os.environ.get("SX_SURVEY_ID") or "195896552"
+# Målingens id i SurveyXact (tallet i https://rest.survey-xact.dk/rest/surveys/ID).
+SX_SURVEY_ID = os.environ.get("SX_SURVEY_ID") or "1229499"
 
 # Variabelen som sier hvilken kommune respondenten hører til. Verdien kan være
-# kommunenummer (f.eks. 4601 eller 301) eller kommunenavn (f.eks. Bergen).
-SX_KOMMUNE_VARIABEL = os.environ.get("SX_KOMMUNE_VARIABEL") or "kommunenr"
+# kommunenavn (f.eks. Bergen) eller kommunenummer (f.eks. 4601 eller 301).
+SX_KOMMUNE_VARIABEL = os.environ.get("SX_KOMMUNE_VARIABEL") or "ptype2t"
 
-# Kolonnene som avgjør om en respondent telles som besvarelse. En respondent
-# telles hvis minst én av kolonnene har verdien 1. I SurveyXact-eksporten er
-# statoverall_4 normalt «Gjennomført» og statoverall_3 «Noen svar».
-SX_STATUS_KOLONNER = [k.strip() for k in (os.environ.get("SX_STATUS_KOLONNER") or "statoverall_4").split(",") if k.strip()]
+# En respondent telles som besvarelse når statusvariabelen har en av verdiene
+# under. Standard: statoverall = 4 («Gjennomført»). Bruk "3,4" for å ta med
+# delvise svar. Er variabelen eksportert som 0/1-kolonner (statoverall_4),
+# brukes de automatisk.
+SX_STATUS_VARIABEL = os.environ.get("SX_STATUS_VARIABEL") or "statoverall"
+SX_STATUS_VERDIER = [v.strip() for v in (os.environ.get("SX_STATUS_VERDIER") or "4").split(",") if v.strip()]
 
 # Kommuner med færre besvarelser enn dette (men flere enn 0) skrives som
 # «færre enn N» i stedet for eksakt antall. 0 = vis alle tall.
@@ -202,7 +203,7 @@ def finn_kommune(verdi, verdikart):
         return None
     if v in verdikart:
         v = verdikart[v]
-    tall = v[:-2] if v.endswith(".0") else v
+    tall = _tall(v)
     if tall.isdigit():
         nr = tall.zfill(4)
         return nr if nr in KOMMUNER else None
@@ -274,21 +275,40 @@ def hent_fra_api():
         raise RuntimeError("Fikk ikke kontakt med SurveyXact: %s" % e.reason) from e
 
 
+def _tall(verdi):
+    v = str(verdi).strip()
+    return v[:-2] if v.endswith(".0") else v
+
+
+def lag_statustest(kolonner):
+    """Returnerer en funksjon som sier om en rad skal telles."""
+    if SX_STATUS_VARIABEL in kolonner:
+        verdier = set(SX_STATUS_VERDIER)
+        return lambda rad: _tall(rad.get(SX_STATUS_VARIABEL, "")) in verdier
+    dummyer = ["%s_%s" % (SX_STATUS_VARIABEL, v) for v in SX_STATUS_VERDIER]
+    if all(d in kolonner for d in dummyer):
+        return lambda rad: any(_tall(rad.get(d, "")) == "1" for d in dummyer)
+    return None
+
+
 def tell(kolonner, rader, verdikart):
-    mangler = [k for k in [SX_KOMMUNE_VARIABEL] + SX_STATUS_KOLONNER if k not in kolonner]
+    statustest = lag_statustest(kolonner)
+    mangler = [] if statustest else [SX_STATUS_VARIABEL]
+    if SX_KOMMUNE_VARIABEL not in kolonner:
+        mangler.insert(0, SX_KOMMUNE_VARIABEL)
     if mangler:
         status = [k for k in kolonner if k.lower().startswith("stat")]
         raise RuntimeError(
-            "Finner ikke kolonnen(e) %s i datasettet.\n"
-            "Statuskolonner som finnes: %s\n"
+            "Finner ikke variabelen %s i datasettet (%d kolonner).\n"
+            "Statusvariabler som finnes: %s\n"
             "Kjør med --vis-kolonner for å se alle kolonner."
-            % (", ".join(mangler), ", ".join(status) or "(ingen)")
+            % (" og ".join(mangler), len(kolonner), ", ".join(status) or "(ingen)")
         )
     per_kommune = Counter()
     ukjente = Counter()
     total = 0
     for rad in rader:
-        if not any(str(rad.get(k, "")).strip() in ("1", "1.0") for k in SX_STATUS_KOLONNER):
+        if not statustest(rad):
             continue
         total += 1
         verdi = rad.get(SX_KOMMUNE_VARIABEL, "")
