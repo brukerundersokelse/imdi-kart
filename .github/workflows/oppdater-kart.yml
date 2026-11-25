@@ -3,7 +3,7 @@ name: Oppdater kart
 
 on:
   schedule:
-    - cron: "3-59/10 * * * *"   # hvert 10. minutt (minutt 3, 13, 23 ...)
+    - cron: "3-59/10 * * * *"   # GitHub kjører i praksis omtrent én gang i timen
   workflow_dispatch:             # gir knappen «Run workflow» i Actions-fanen
   push:
     branches: [main]
@@ -19,16 +19,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  oppdater:
+  # Jobb 1: henter tall fra SurveyXact og lager nettsiden.
+  # Feiler denne, publiseres ingenting, og kartet beholder forrige tall.
+  hent:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v5
 
-      # Feiler dette steget, publiseres ingenting, og kartet beholder forrige tall.
       - name: Hent tall fra SurveyXact
         env:
           SX_USER: ${{ secrets.SX_USER }}
@@ -42,5 +40,24 @@ jobs:
         with:
           path: _site
 
-      - id: deploy
+  # Jobb 2: publiserer. Egen jobb og ett nytt forsøk etter 30 sekunder,
+  # fordi GitHub av og til ikke finner pakken rett etter opplasting.
+  publiser:
+    needs: hent
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.forsok1.outputs.page_url || steps.forsok2.outputs.page_url }}
+    steps:
+      - id: forsok1
+        uses: actions/deploy-pages@v5
+        continue-on-error: true
+
+      - name: Vent før nytt forsøk
+        if: steps.forsok1.outcome == 'failure'
+        run: sleep 30
+
+      - id: forsok2
+        if: steps.forsok1.outcome == 'failure'
         uses: actions/deploy-pages@v5
